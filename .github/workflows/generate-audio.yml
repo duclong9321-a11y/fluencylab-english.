@@ -1,0 +1,98 @@
+name: Generate AI Neural Audio
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "index.html"
+      - ".github/workflows/generate-audio.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-audio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install edge-tts
+        run: pip install edge-tts
+
+      - name: Generate MP3 voices (Ava Neural - US English)
+        run: |
+          python3 - << 'EOF'
+          import asyncio, json, os, re
+          import edge_tts
+
+          VOICE = "en-US-AvaMultilingualNeural"
+          FALLBACK_VOICE = "en-US-AvaNeural"
+
+          html = open("index.html", "r", encoding="utf-8").read()
+          m = re.search(r'const lessonsData = \[([\s\S]*?)\n\];', html)
+          if not m:
+              raise SystemExit("Khong tim thay lessonsData trong index.html")
+
+          body = m.group(1)
+          items = []
+          for obj_m in re.finditer(r'\{\s*id:\s*"([^"]+)"([^}]*)\}', body):
+              lid, rest = obj_m.group(1), obj_m.group(2)
+              def get_str(key):
+                  km = re.search(rf'\b{key}:\s*"((?:\\.|[^"\\])*)"', rest)
+                  return json.loads('"' + km.group(1) + '"') if km else None
+              mode = get_str("mode")
+              if mode == "builder":
+                  btype = get_str("type")
+                  if btype == "tiles":
+                      ans = get_str("answer")
+                      full = ans + ("?" if re.match(r'^(Are|Have|Can|Do|Did|Is)\b', ans) else ".")
+                      items.append((f"{lid}.mp3", full))
+                  elif btype == "verb":
+                      before, after = get_str("before"), get_str("after")
+                      am = re.search(r'\banswers:\s*\[\s*"((?:\\.|[^"\\])*)"', rest)
+                      first_ans = json.loads('"' + am.group(1) + '"')
+                      full = f"{before} {first_ans}{'.' if after == '.' else ' ' + after}"
+                      items.append((f"{lid}.mp3", full))
+              elif mode == "phrase":
+                  items.append((f"{lid}.mp3", get_str("en")))
+              elif mode == "flash":
+                  items.append((f"{lid}.mp3", get_str("en")))
+                  ex = get_str("example")
+                  if ex:
+                      items.append((f"{lid}-ex.mp3", ex))
+
+          items.append(("test.mp3", "Hey! Nice to meet you. Let's practice some English today."))
+          os.makedirs("audio", exist_ok=True)
+
+          async def synth(filename, text):
+              out = os.path.join("audio", filename)
+              if os.path.exists(out) and os.path.getsize(out) > 1000:
+                  return
+              for voice in (VOICE, FALLBACK_VOICE):
+                  try:
+                      await edge_tts.Communicate(text, voice).save(out)
+                      print(f"OK [{voice}]: {filename}")
+                      return
+                  except Exception as e:
+                      print(f"Retry {filename} with fallback ({e})")
+              raise RuntimeError(f"Failed: {filename}")
+
+          async def main():
+              for fn, txt in items:
+                  await synth(fn, txt)
+
+          asyncio.run(main())
+          EOF
+
+      - name: Commit audio files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add audio/
+          git diff --staged --quiet || (git commit -m "chore: generate AI neural audio [skip ci]" && git push)
+          
